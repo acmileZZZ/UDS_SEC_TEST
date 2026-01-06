@@ -7,7 +7,7 @@ This script focuses on:
 - Custom packet crafting and injection (UDP/TCP).
 - Subscribe/verify/replay helper flows.
 
-Python 3.10 compatible.
+Python 3.11 compatible.
 """
 from __future__ import annotations
 
@@ -57,17 +57,33 @@ class ScapyComponents:
     sd_option_ipv6_endpoint: type
 
 
+def _extract_in6_entry(entry):
+    if hasattr(entry, "ifname") and hasattr(entry, "addr"):
+        return entry.ifname, entry.addr
+    if isinstance(entry, tuple) and entry:
+        # Scapy can return tuples such as (addr, iface, scope, ...)
+        iface = entry[1] if len(entry) > 1 else None
+        addr = entry[0]
+        return iface, addr
+    return None, None
+
+
 def resolve_ipv6_address(iface: str) -> str:
-    addresses = [x for x in in6_getifaddr() if x.ifname == iface]
+    addresses = []
+    for entry in in6_getifaddr():
+        name, addr = _extract_in6_entry(entry)
+        if name == iface and addr:
+            addresses.append(str(addr))
+
     for addr in addresses:
-        if not addr.addr.startswith("fe80"):
-            return addr.addr.split("%")[0]
+        if not str(addr).startswith("fe80"):
+            return str(addr).split("%")[0]
     if addresses:
-        return addresses[0].addr.split("%")[0]
+        return str(addresses[0]).split("%")[0]
     raise ValueError(f"No IPv6 address found for interface {iface}")
 
 
-def choose_interface(preferred: Optional[str]) -> InterfaceProfile:
+def choose_interface(preferred: Optional[str], manual_ipv6: Optional[str] = None) -> InterfaceProfile:
     available = get_if_list()
     if preferred:
         iface = preferred
@@ -80,7 +96,26 @@ def choose_interface(preferred: Optional[str]) -> InterfaceProfile:
         choice = input("Select interface index: ").strip()
         iface = available[int(choice)]
     mac = get_if_hwaddr(iface)
-    ipv6 = resolve_ipv6_address(iface)
+
+    if manual_ipv6:
+        try:
+            ipaddress.IPv6Address(manual_ipv6)
+        except ValueError as exc:
+            raise ValueError(f"Invalid IPv6 address provided for --iface-ipv6: {manual_ipv6}") from exc
+        ipv6 = manual_ipv6
+        print(f"Using interface {iface} (MAC={mac}, IPv6={ipv6}; provided via --iface-ipv6)")
+    else:
+        try:
+            ipv6 = resolve_ipv6_address(iface)
+        except ValueError as exc:
+            guidance = (
+                f"No IPv6 address found for interface {iface}. "
+                "Provide one with --iface-ipv6 or configure IPv6 on the interface "
+                "(e.g., `ip -6 addr add <addr>/<prefix> dev <iface>`)."
+            )
+            raise ValueError(guidance) from exc
+        print(f"Using interface {iface} (MAC={mac}, IPv6={ipv6})")
+
     return InterfaceProfile(name=iface, mac=mac, ipv6=ipv6)
 
 
@@ -167,6 +202,10 @@ def sniff_service_discovery(iface: InterfaceProfile, duration: Optional[int]) ->
         "store": False,
         "filter": f"udp port {DEFAULT_SD_PORT} or udp port {DEFAULT_SD_MC_PORT}",
     }
+    if duration:
+        print(f"Listening for SOME/IP-SD traffic on {iface.name} for {duration} seconds...")
+    else:
+        print(f"Listening for SOME/IP-SD traffic on {iface.name} until interrupted...")
     sniffer = AsyncSniffer(**sniff_args)
     sniffer.start()
     try:
@@ -211,6 +250,10 @@ def sniff_subscription_requests(iface: InterfaceProfile, duration: Optional[int]
         store=False,
         filter=f"udp port {DEFAULT_SD_PORT} or udp port {DEFAULT_SD_MC_PORT}",
     )
+    if duration:
+        print(f"Monitoring subscription requests on {iface.name} for {duration} seconds...")
+    else:
+        print(f"Monitoring subscription requests on {iface.name} until interrupted...")
     sniffer.start()
     try:
         if duration:
@@ -253,6 +296,10 @@ def send_custom_packet(args, iface: InterfaceProfile, components: ScapyComponent
         pkt = Ether(src=iface.mac) / pkt
         send_func = sendp
     interval = args.period_ms / 1000.0 if args.period_ms else None
+    print(
+        f"Sending {args.transport} SOME/IP packet from {src_ip}:{args.src_port} "
+        f"to {dst_ip}:{args.dst_port} (layer2={'on' if args.use_layer2 else 'off'})"
+    )
     if interval:
         print(f"Sending every {args.period_ms} ms. Press Ctrl+C to stop...")
         try:
@@ -404,7 +451,10 @@ def subscribe_flow(args, iface: InterfaceProfile, components: ScapyComponents) -
         remote_ip,
         remote_port,
     )
-    print(f"Sending SubscribeEventgroup to {remote_ip}:{remote_port}...")
+    print(
+        f"Sending SubscribeEventgroup to service 0x{args.service_id:04x} "
+        f"instance 0x{args.instance_id:04x} at {remote_ip}:{remote_port}"
+    )
     send(subscribe_pkt, iface=iface.name, verbose=False)
     print("Waiting for ACK/NACK...")
     if not await_ack(iface, components, args.service_id, args.timeout):
@@ -477,6 +527,11 @@ def int_hex(value: str) -> int:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SOME/IP & SOME/IP-SD diagnostic toolkit")
     parser.add_argument("--iface", help="Network interface to use")
+    parser.add_argument(
+        "--iface-ipv6",
+        dest="iface_ipv6",
+        help="Override IPv6 address for the selected interface (useful when the interface lacks IPv6)",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -522,7 +577,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
-    iface = choose_interface(args.iface)
+    iface = choose_interface(args.iface, manual_ipv6=args.iface_ipv6)
     components = load_scapy_components()
 
     if args.command == "discover":
