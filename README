@@ -1,1 +1,58 @@
-111
+# SOME/IP Diagnostic Toolkit
+
+This repository provides a Python 3.11 CLI script (`someip_tool.py`) for observing and crafting SOME/IP and SOME/IP-SD traffic.
+
+## Prerequisites
+- Python 3.11
+- `scapy` with SOME/IP contrib modules (e.g., `pip install "scapy>=2.5"`); the script prefers Scapy 2.7's built-in SOME/IP and SOME/IP-SD APIs from `scapy.contrib.automotive.someip`
+- Root or CAP_NET_RAW privileges to capture/send packets
+
+## Quick start
+1. **Install dependencies**
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install "scapy>=2.5"
+   ```
+
+2. **Choose a network interface**
+   The tool will prompt for an interface if `--iface` is not provided. The selected interface supplies the default MAC/IPv6 unless you override them in a command. If the interface has no IPv6 address, pass `--iface-ipv6 <addr>` to provide one explicitly; the resolver now also falls back to Scapy's interface metadata, IPv6 helpers, and `ip -6 addr show dev <iface>` output to automatically locate valid addresses (including VLAN-style names such as `eth1.12@eth1`).
+
+3. **Run the CLI**
+   ```bash
+   python someip_tool.py <command> [options]
+   ```
+
+## Commands
+- **Service discovery listener**
+  ```bash
+  python someip_tool.py discover --iface eth0 --duration 30
+  ```
+
+- **Subscription monitor**
+  ```bash
+  python someip_tool.py monitor-subscriptions --iface eth0
+  ```
+
+- **Custom packet injection** (UDP example)
+  ```bash
+  python someip_tool.py inject --iface eth0 --transport UDP \
+    --dst-ip 2001:db8::1 --dst-port 30490 \
+    --service-id 0x1234 --method-id 0x0001 --client-id 0x0002 --session-id 0x0001 \
+    --payload deadbeef --period-ms 1000
+  ```
+
+- **Subscribe, verify, and replay** (FindService first)
+  ```bash
+  python someip_tool.py subscribe --iface eth0 --scenario find \
+    --service-id 0x1234 --instance-id 0x0001 --eventgroup-id 0x0001 \
+    --major-version 1 --minor-version 1 --ttl 3 --timeout 10
+  ```
+
+Adjust IPs/ports to your environment. Use `-h` on any subcommand for full option help.
+
+## Troubleshooting
+- Run with root or `sudo` so packet capture works.
+- Install Scapy with SOME/IP contrib modules (`pip install "scapy>=2.5"`).
+- The listeners print a startup message once capture begins; if you see no packets afterward, there may simply be no SOME/IP/SOME/IP-SD traffic on the network segment.
+- If you get "No IPv6 address found for interface ...", configure IPv6 on that interface (e.g., `ip -6 addr add <addr>/<prefix> dev <iface>`) or re-run the command with `--iface-ipv6 <addr>`.
